@@ -18,16 +18,8 @@ import json
 import os
 import pkg_resources
 import re
+import shutil
 import zipfile
-
-def _bfs_walk(dirname): 
-  dirs = [dirname] 
-  while len(dirs): 
-    parent = dirs.pop(0)
-    children = [os.path.join(parent, fname) for fname in os.listdir(parent)]
-    children = [d for d in children if os.path.isdir(d)]
-    dirs.extend(children)
-    yield parent
 
 class Wheel(object):
 
@@ -61,17 +53,9 @@ class Wheel(object):
     # e.g. google_cloud-0.27.0-py2.py3-none-any.whl ->
     #      google_cloud-0.27.0.dist-info
     return '{}-{}.dist-info'.format(self.distribution(), self.version())
-
-  def _find_package_path(self, directory):
-    name = self.name()
-
-    # search the directory structure for the right folder
-    for dirname in _bfs_walk(directory): 
-        if os.path.exists(os.path.join(dirname, name)): 
-            print("WHL.PY: %s, %s" % (name, dirname))
-            return dirname
-
-    raise Exception("Could not find the module directory for dep %s" % name)
+  
+  def _data(self):
+    return '{}-{}.data'.format(self.distribution(), self.version())
 
   def metadata(self):
     # Extract the structured data from metadata.json in the WHL's dist-info
@@ -127,6 +111,25 @@ class Wheel(object):
   def expand(self, directory):
     with zipfile.ZipFile(self.path(), 'r') as whl:
       whl.extractall(directory)
+    
+    # Find any lib directories, and move them to the top level.
+    try:
+        data_contents = os.listdir(self._data())
+    except:
+        data_contents = []
+
+    # TODO: This is probably wrong. These have different targets, and probably both need to be
+    # installed.
+    if 'purelib' in data_contents:
+        source = os.path.join(self._data(), 'purelib')
+    elif 'platlib' in data_contents:
+        source = os.path.join(self._data(), 'platlib')
+    else:
+        source = None
+
+    if source:
+        for f in os.listdir(source):
+            shutil.move(os.path.join(source, f), directory)
 
   # _parse_metadata parses METADATA files according to https://www.python.org/dev/peps/pep-0314/
   def _parse_metadata(self, content):
@@ -157,8 +160,6 @@ def main():
   # Extract the files into the current directory
   whl.expand(args.directory)
 
-  import_path = whl._find_package_path(args.directory)
-
   with open(os.path.join(args.directory, 'BUILD'), 'w') as f:
     f.write("""
 package(default_visibility = ["//visibility:public"])
@@ -172,12 +173,11 @@ py_library(
     data = glob(["**/*"], exclude=["**/*.py", "**/* *", "BUILD", "WORKSPACE"]),
     # This makes this directory a top-level in the python import
     # search path for anything that depends on this.
-    imports = ["{import_path}"],
+    imports = ["."],
     deps = [{dependencies}],
 )
 {extras}""".format(
   requirements=args.requirements,
-  import_path=import_path,
   dependencies=','.join([
     'requirement("%s")' % d
     for d in whl.dependencies()
